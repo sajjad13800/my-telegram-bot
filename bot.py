@@ -1,6 +1,5 @@
 import os
 import logging
-import sqlite3
 import uuid
 from threading import Thread
 from pathlib import Path
@@ -20,11 +19,9 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 # --- بخش پیکربندی ---
-# بارگذاری متغیرهای محیطی (برای محلی) و آماده‌سازی برای Railway
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / '.env')
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-# Railway به صورت خودکار این متغیر را تنظیم می‌کند
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 logging.basicConfig(
@@ -40,42 +37,18 @@ def health_check():
     """برای اینکه Railway بفهمد ربات زنده است."""
     return "I'm alive!"
 
-def run_flask():
-    """اجرای سرور Flask در یک ترد جداگانه."""
-    app.run(host='0.0.0.0', port=8080)
-
 # --- پایگاه داده PostgreSQL ---
 def get_db_connection():
-    """ایجاد اتصال به پایگاه داده PostgreSQL."""
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def setup_database():
-    """جدول‌های مورد نیاز را در PostgreSQL ایجاد می‌کند."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS metadata (
-            code TEXT PRIMARY KEY,
-            description TEXT NOT NULL,
-            is_mix INTEGER NOT NULL DEFAULT 0
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS files (
-            id SERIAL PRIMARY KEY,
-            code TEXT NOT NULL,
-            channel_message_id INTEGER NOT NULL,
-            file_type TEXT NOT NULL,
-            FOREIGN KEY (code) REFERENCES metadata (code)
-        )
-    ''')
-    
+    cursor.execute('''CREATE TABLE IF NOT EXISTS metadata (code TEXT PRIMARY KEY, description TEXT NOT NULL, is_mix INTEGER NOT NULL DEFAULT 0)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS files (id SERIAL PRIMARY KEY, code TEXT NOT NULL, channel_message_id INTEGER NOT NULL, file_type TEXT NOT NULL, FOREIGN KEY (code) REFERENCES metadata (code))''')
     conn.commit()
     cursor.close()
     conn.close()
-    print("پایگاه داده PostgreSQL با موفقیت آماده شد.")
 
 # --- منطق آپلود "Mix" ---
 AWAITING_DESCRIPTION = 1
@@ -138,7 +111,6 @@ async def handle_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         
         del context.user_data['current_batch']
-        
         await update.message.reply_text(f"مجموعه با موفقیت ذخیره شد.\n\nکد شما: `{unique_code}`\nتوضیحات: {description}", parse_mode='Markdown')
 
 # --- منطق دریافت و تأیید ---
@@ -213,33 +185,33 @@ async def download_confirmation_handler(update: Update, context: ContextTypes.DE
 
     return ConversationHandler.END
 
-# --- تابع اصلی ---
-def main():
-    """تابع اصلی برای اجرای ربات."""
-    # اجرای سرور Flask در یک ترد جداگانه
-    Thread(target=run_flask).start()
-    
+# --- تابع اصلی برای اجرای ربات تلگرام ---
+def run_telegram_bot():
+    """این تابع ربات تلگرام را در یک ترد جداگانه اجرا می‌کند."""
     setup_database()
     job_queue = JobQueue()
-    application = Application.builder().token(TOKEN).job_queue(job_queue).build()
+    telegram_app = Application.builder().token(TOKEN).job_queue(job_queue).build()
 
-    application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.ANIMATION | filters.Document.ALL, handle_file))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_reply))
+    telegram_app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.ANIMATION | filters.Document.ALL, handle_file))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_reply))
 
     conv_handler_get = ConversationHandler(
         entry_points=[CommandHandler("get", get_command)],
         states={AWAITING_DOWNLOAD_CONFIRMATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, download_confirmation_handler)]},
         fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
     )
-    application.add_handler(conv_handler_get)
+    telegram_app.add_handler(conv_handler_get)
     
-    application.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("ربات شخصی شما آماده است. یک فایل برایم بفرستید!")))
+    telegram_app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("ربات شخصی شما آماده است. یک فایل برایم بفرستید!")))
 
-    print("ربات در حال اجراست...")
-    application.run_polling()
+    print("ربات تلگرام در حال اجراست...")
+    telegram_app.run_polling()
 
-# این متغیر برای Gunicorn (در railway.toml) ضروری است
-app = application = Application.builder().token(TOKEN).build()
+# --- شروع اجرا ---
+# این ترد، ربات تلگرام را در پس‌زمینه اجرا می‌کند تا سرور Flask مسدود نشود.
+bot_thread = Thread(target=run_telegram_bot)
+bot_thread.start()
 
+# این بخش فقط برای اجرای محلی (روی کامپیوتر خودتان) است
 if __name__ == "__main__":
-    main()
+    app.run(host='0.0.0.0', port=8080)
